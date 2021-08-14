@@ -1,0 +1,161 @@
+---
+title: "MSc-Project-2021"
+author: "Hannah Murphy"
+---
+
+
+## R Markdown
+
+This is an R Markdown document including the code used for my MSc project entitiled 'Investigating the molecular validity of a mouse
+model of neurodevelopmental disorders based on social isolation' 
+
+- It includes importing RNA transcripts from adult female mice under a model of post-weaning social isolation vs group-housed control. 
+- The transcripts have been quantified by the package Salmon. Package 'tximport' was used to import the transcripts.
+- 'DESeq2' was used to investigate differential expression between the two groups
+- 'EnhancedVolcano' package was used to visualize the results
+- 'denovolyzer package for de novo analysis - check if DEGs are enriched for genes containing de novo mutations reported in exome sequencing studies for SZ trios
+- 'EWCE' package and single cell RNA-seq (scRNA-seq) data to investigate which individual cell types are enriched for the DEGs
+
+
+
+```{r}
+
+# Load packages 
+
+BiocManager::install("tximport")
+BiocManager::install("GenomicFeatures")
+BiocManager::install("readr")
+BiocManager::install("DESeq2")
+BiocManager::install("apeglm")
+BiocManager::install('EnhancedVolcano')
+BiocManager::install("denovolyzeR")
+BiocManager::install("EWCE")
+library(tximport)
+library(GenomicFeatures)
+library(readr)
+library(DESeq2)
+library(apeglm)
+library(EnhancedVolcano)
+library(denovolyzeR)
+library(EWCE)
+library(biomaRt)
+
+
+
+# Read in sample information (names, read count etc) 
+samples <- read.delim('sample_info.txt', header = T, sep = "\t")
+
+# Filter samples for minimum 5 million reads 
+samples <- samples[samples$M.Seqs > 5, ]
+
+# Name the quant.sf files (Salmon output files)
+trim_files <- file.path("Salmon_output_files", paste0(samples$Sample.Name,"_quant"), "quant.sf")
+names(trim_files) <- paste0(samples$Sample.Name)
+
+
+
+# Mouse Genome: Transcript -> Gene name 
+txdb <- makeTxDbFromGFF("Mus_musculus.GRCm38.96.gtf")
+k <- keys(txdb, keytype ="TXNAME")
+tx2gene <- select(txdb, k, "GENEID", "TXNAME")
+
+# use 'tximport' to import reads and convert to gene IDs 
+trim_txi <- tximport(trim_files, type = "salmon", tx2gene = tx2gene, ignoreTxVersion = TRUE)
+
+
+
+
+# Run Differential expression analysis
+trim_ddsTxi <- DESeqDataSetFromTximport(trim_txi, samples, design = ~ Group)
+
+# Pre-filtering
+# Minimal pre-filtering to keep only rows that have at least 10 reads total.
+keep <- rowSums(counts(trim_ddsTxi)) >= 10
+trim_ddsTxi <- trim_ddsTxi[keep,]
+
+# Choosing Adult females group housing as the reference for all groups to be compared against
+trim_ddsTxi$Group <- relevel(trim_ddsTxi$Group, ref = "AdultFVG")
+
+#Run DESeq
+trim_DEdds <- DESeq(trim_ddsTxi)
+
+# Results
+# filter out female mice ----> so the female group v social isolation
+res <- lfcShrink(trim_DEdds, coef = "Group_AdultFVSI_vs_AdultFVG", type = "apeglm")
+
+
+
+
+# Visualization --- Volcano Plot
+# Read in hgnc symbols
+hgnc_sym <- read.csv("hgnc_symbol_with_rownames", sep="\t", row.names = 1)
+
+# turn results into dataframe
+res1 <- data.frame(res)
+merged <- merge(res1, hgnc_sym, by="row.names", all=TRUE)
+
+# EnhancedVolcano: publication-ready volcano plots with enhanced colouring and labeling 
+EnhancedVolcano(res, lab = merged$hgnc,
+    x = 'log2FoldChange',
+    y = 'pvalue',
+    title = 'Social Isolation versus Group Housed',
+    pCutoff = 0.05,
+    pCutoffCol = 'padj',
+    FCcutoff = 0.263,
+    pointSize = 3.0,
+    labSize = 0,
+    col=c('black', 'black', 'black', 'turquoise'),
+    colAlpha = 1)
+
+
+
+
+# de novo analysis with denovolyzer
+
+geneset <- readLines("file_with_differentially_expressed_gene_list.txt") #read in geneset
+de_novo_data_SCZ <- read.delim("SCZ_ref_genes", sep = "\t", header = T)
+
+head(de_novo_data_SCZ)
+de_novo_results_SCZ <- denovolyzeByClass(genes = de_novo_data_SCZ$Genes, classes = de_novo_data_SCZ$Class, nsamples = 3394, includeGenes = geneset) #nsamples = number of trios
+de_novo_results_SCZ
+
+
+
+
+# Expression weighted cell-type enrichment (EWCE) analysis
+
+#Load annotation matrix (classifies all the cell types) and expression matrix (contains all the gene expression levels in each cell type)
+annot<-readRDS("annotation.BrainCellAtlas_Saunders_version_2018.04.01.RDS")
+exp <- readRDS("metacells.BrainCellAtlas_Saunders_version_2018.04.01.RDS")
+
+
+#Read in your geneset
+genelist <- readLines("file_with_differentially_expressed_gene_list.txt")
+
+#Get background geneset
+human = useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+mouse = useMart("ensembl", dataset = "mmusculus_gene_ensembl")
+all_hgnc <- getBM(attributes = ("hgnc_symbol"), mart = human)
+human.bg <- all_hgnc$hgnc_symbol
+
+
+#Set up comparison levels (you will only be comparing level 2, but this sets up both level 1 and 2)
+expData = exp_mat_fixed
+l1=annot$full_name
+l2=annot$tissue_subcluster
+annotLevels = list(l1=l1,l2=l2)
+
+
+#Run analysis and bootstrap 
+full_results = bootstrap_enrichment_test(sct_data=ctd,hits=genelist,
+                                         bg=human.bg,reps=100000,annotLevel=2,
+                                         geneSizeControl=TRUE,genelistSpecies="human",sctSpecies="mouse")
+
+results <- full_results$results[order(full_results$results$p),]
+
+
+
+# write results to file
+write.table(results, "output_EWCE.txt", quote = FALSE, row.names = FALSE)
+
+```
