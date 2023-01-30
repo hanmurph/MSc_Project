@@ -1,5 +1,1 @@
-# MSc_Project
-Code used for my MSc project 
-
-
-See master branch for git uploads
+# MSc_Project - see master branch
